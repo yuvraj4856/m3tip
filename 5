@@ -1,0 +1,93 @@
+#include <mpi.h>
+#include <iostream>
+#include <cstdlib>
+#include <ctime>
+#include <CL/cl.h>
+
+#define N 1000
+
+using namespace std;
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+
+    int size, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    int rows_per_process = N / size;
+    int extra_rows = N % size;
+    int my_rows = (rank < extra_rows) ? rows_per_process + 1 : rows_per_process;
+    int my_first_row = (rank < extra_rows) ? rank * my_rows : rank * my_rows + extra_rows;
+    int my_last_row = my_first_row + my_rows - 1;
+
+    double* A = new double[N * my_rows];
+    double* B = new double[N * N];
+    double* C = new double[N * my_rows];
+
+    if (rank == 0) {
+        // Initialize matrices A and B with random values
+        srand(time(NULL));
+        for (int i = 0; i < N * N; i++) {
+            B[i] = (double)rand() / RAND_MAX;
+        }
+        for (int i = 0; i < N * my_rows; i++) {
+            A[i] = (double)rand() / RAND_MAX;
+        }
+    }
+
+    // Scatter matrix A to all processes
+    MPI_Scatter(A, N * my_rows, MPI_DOUBLE, A, N * my_rows, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // Broadcast matrix B to all processes
+    MPI_Bcast(B, N * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    // Initialize OpenCL
+    cl_platform_id platform_id;
+    cl_device_id device_id;
+    cl_context context;
+    cl_command_queue queue;
+    cl_program program;
+    cl_kernel kernel;
+    cl_int err;
+
+    // Get the first platform
+    err = clGetPlatformIDs(1, &platform_id, NULL);
+    if (err != CL_SUCCESS) {
+        cout << "Error: Failed to get platform ID!" << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Get the first GPU device
+    err = clGetDeviceIDs(platform_id, CL_DEVICE_TYPE_GPU, 1, &device_id, NULL);
+    if (err != CL_SUCCESS) {
+        cout << "Error: Failed to get device ID!" << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Create a context
+    context = clCreateContext(NULL, 1, &device_id, NULL, NULL, &err);
+    if (err != CL_SUCCESS) {
+        cout << "Error: Failed to create context!" << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Create a command queue
+    queue = clCreateCommandQueue(context, device_id, 0, &err);
+    if (err != CL_SUCCESS) {
+        cout << "Error: Failed to create command queue!" << endl;
+        return EXIT_FAILURE;
+    }
+
+    // Create the program
+    const char* source =
+            "__kernel void matrix_mult(__global double* A, __global double* B, __global double* C, int N, int my_rows) {\n"
+    "    int i = get_global_id(0);\n"
+    "    int j = get_global_id(1);\n"
+    "    if (i < my_rows && j < N) {\n"
+    "        C[i * N + j] = 0;\n"
+    "        for (int k = 0; k < N; k++) {\n"
+    "            C[i * N + j] += A[i * N + k] * B[k * N + j];\n"
+    "        }\n"
+    "    }\n"
+    "}";
